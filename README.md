@@ -134,6 +134,39 @@ sudo fail2ban-client status
 sudo certbot renew --dry-run
 ```
 
+## Mailbox Manager
+
+An optional utility to manage Linux-user-backed mailboxes (create, list, change passwords, test, repair, disable/enable, remove). It assumes a simple Postfix+Dovecot setup where each mailbox maps to a system user and Maildir under `/home/<user>/Maildir`.
+
+Install:
+
+```bash
+chmod +x mailbox-manager.sh
+sudo mv mailbox-manager.sh /usr/local/sbin/mailbox-manager
+```
+
+Run interactively:
+
+```bash
+sudo mailbox-manager
+```
+
+Direct commands:
+
+```bash
+sudo mailbox-manager add support
+sudo mailbox-manager list
+sudo mailbox-manager passwd support
+sudo mailbox-manager info support
+sudo mailbox-manager test support
+sudo mailbox-manager repair support
+sudo mailbox-manager disable support
+sudo mailbox-manager enable support
+sudo mailbox-manager remove support
+```
+
+Domain detection can be overridden with `MAIL_DOMAIN=example.com`.
+
 ## Notes
 
 - SPF/DKIM/DMARC passing does not guarantee Gmail Inbox placement. A new VPS IP may have little reputation and initially land in spam.
