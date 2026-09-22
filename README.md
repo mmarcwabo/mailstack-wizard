@@ -11,14 +11,14 @@ It was designed from a real deployment where the **website and mail server live 
 
 ## What it installs
 
-- Postfix — SMTP receiving/sending
-- Dovecot — IMAP
-- OpenDKIM — DKIM signing
-- Let's Encrypt / Certbot — TLS
-- Fail2ban — basic protection
-- Roundcube — webmail
-- Nginx — Roundcube vhost
-- Swaks — SMTP testing tools
+- Postfix - SMTP receiving/sending
+- Dovecot - IMAP
+- OpenDKIM - DKIM signing
+- Let's Encrypt / Certbot - TLS
+- Fail2ban - basic protection
+- Roundcube - webmail
+- Nginx - Roundcube vhost
+- Swaks - SMTP testing tools
 
 ## Important design decisions
 
@@ -26,15 +26,15 @@ The wizard does **not** replace your existing website Nginx virtual host.
 
 Mail uses separate ports:
 
-- 25 — server-to-server SMTP
-- 587 — authenticated SMTP submission
-- 993 — IMAPS
-- 8891 — OpenDKIM, localhost only
+- 25 - server-to-server SMTP
+- 587 - authenticated SMTP submission
+- 993 - IMAPS
+- 8891 - OpenDKIM, localhost only
 
 Website ports stay:
 
-- 80 — HTTP
-- 443 — HTTPS
+- 80 - HTTP
+- 443 - HTTPS
 
 ## Before running
 
