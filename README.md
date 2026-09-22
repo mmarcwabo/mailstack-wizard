@@ -17,6 +17,7 @@ It was designed from a real deployment where the **website and mail server live 
 - Let's Encrypt / Certbot - TLS
 - Fail2ban - basic protection
 - Roundcube - webmail
+- MariaDB - Roundcube sessions and settings
 - Nginx - Roundcube vhost
 - Swaks - SMTP testing tools
 
@@ -56,7 +57,7 @@ A     mail        203.0.113.10
 A     webmail     203.0.113.10
 MX    @           mail.example.com.       priority 10
 TXT   @           v=spf1 a mx ip4:203.0.113.10 ~all
-TXT   _dmarc      v=DMARC1; p=none; rua=mailto:dmarc@example.com
+TXT   _dmarc      v=DMARC1; p=none; rua=mailto:info@example.com
 ```
 
 PTR at the VPS provider:
@@ -75,6 +76,13 @@ sudo ./mailstack-wizard.sh
 ```
 
 The wizard will pause at DNS/DKIM checkpoints.
+
+On Ubuntu 24 this installer now:
+
+- starts OpenDKIM as the `opendkim` user (the packaged unit times out, and a root process refuses the DKIM key)
+- installs MariaDB and creates the Roundcube database
+- writes Roundcube 1.6 `imap_host` / `smtp_host` so webmail uses STARTTLS on port 587
+- adds a Dovecot drop-in for the Postfix SASL socket and a placeholder Nginx site for `mail.example.com` so Certbot can issue the certificate
 
 ## First mailbox model
 

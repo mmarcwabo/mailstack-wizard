@@ -15,7 +15,7 @@ set -Eeuo pipefail
 # - The wizard creates timestamped backups before changing config files.
 # ============================================================
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 BACKUP_ROOT="/root/mailstack-wizard-backups"
 TS="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$BACKUP_ROOT/$TS"
@@ -188,7 +188,7 @@ At your DNS provider, create/verify:
   MX    @           $MAIL_HOST.       priority 10
 
   TXT   @           v=spf1 a mx ip4:$SERVER_IP ~all
-  TXT   _dmarc      v=DMARC1; p=none; rua=mailto:dmarc@$ROOT_DOMAIN
+  TXT   _dmarc      v=DMARC1; p=none; rua=mailto:$MAIL_ADDRESS
 
 At your VPS provider, set PTR / reverse DNS:
 
@@ -229,6 +229,7 @@ apt-get install -y \
   swaks \
   dnsutils \
   ca-certificates \
+  mariadb-server \
   roundcube roundcube-core roundcube-mysql \
   php-fpm php-mysql php-intl php-mbstring php-xml php-curl php-zip
 
@@ -327,27 +328,25 @@ grep -q '^mail_location = maildir:~/Maildir' /etc/dovecot/conf.d/10-mail.conf ||
 
 sed -i -E 's|^[# ]*disable_plaintext_auth\s*=.*|disable_plaintext_auth = yes|' /etc/dovecot/conf.d/10-auth.conf
 sed -i -E 's|^[# ]*auth_mechanisms\s*=.*|auth_mechanisms = plain login|' /etc/dovecot/conf.d/10-auth.conf
+if grep -qE '^[# ]*auth_username_format\s*=' /etc/dovecot/conf.d/10-auth.conf; then
+  sed -i -E 's|^[# ]*auth_username_format\s*=.*|auth_username_format = %n|' /etc/dovecot/conf.d/10-auth.conf
+else
+  echo 'auth_username_format = %n' >> /etc/dovecot/conf.d/10-auth.conf
+fi
 
-if ! grep -q '/var/spool/postfix/private/auth' /etc/dovecot/conf.d/10-master.conf; then
-  python3 - <<'PY'
-from pathlib import Path
-p=Path("/etc/dovecot/conf.d/10-master.conf")
-s=p.read_text()
-needle="service auth {"
-insert="""service auth {
+# Own drop-in so we never rewrite Debian's service auth { } block or
+# change ownership of /var/spool/postfix/private.
+cat > /etc/dovecot/conf.d/99-postfix-auth.conf <<'EOF'
+service auth {
   unix_listener /var/spool/postfix/private/auth {
     mode = 0660
     user = postfix
     group = postfix
   }
-"""
-if needle in s:
-    s=s.replace(needle, insert, 1)
-    p.write_text(s)
-else:
-    raise SystemExit("Could not find 'service auth {' in Dovecot config")
-PY
-fi
+}
+EOF
+chown postfix:root /var/spool/postfix/private
+chmod 700 /var/spool/postfix/private
 
 dovecot -n >/dev/null
 systemctl enable dovecot
@@ -360,7 +359,22 @@ ok "Dovecot configured."
 show_step 9 "Issue TLS certificate for mail"
 
 systemctl enable --now nginx
+
+# certbot --nginx needs a server_name for the mail host.
+MAIL_NGINX="/etc/nginx/sites-available/$MAIL_HOST"
+if [[ ! -f "$MAIL_NGINX" ]]; then
+  cat > "$MAIL_NGINX" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $MAIL_HOST;
+    location / { return 404; }
+}
+EOF
+  ln -sfn "$MAIL_NGINX" "/etc/nginx/sites-enabled/$MAIL_HOST"
+fi
 nginx -t
+systemctl reload nginx
 
 if certbot certificates 2>/dev/null | grep -q "Certificate Name: $MAIL_HOST"; then
   ok "Existing certificate found for $MAIL_HOST."
@@ -434,9 +448,18 @@ $ROOT_DOMAIN
 EOF
 
 # Use localhost TCP to avoid Postfix chroot socket path issues.
+# UserID is required: Ubuntu 24 starts the filter as root unless told
+# otherwise, then refuses keys owned by the opendkim user.
+install -d -m 750 -o opendkim -g opendkim /run/opendkim
+chown -R opendkim:opendkim /etc/opendkim
+chmod 750 /etc/opendkim /etc/opendkim/keys "$DKIM_DIR"
+chmod 600 "$DKIM_DIR/default.private"
+
 cat > /etc/opendkim.conf <<EOF
 Syslog                  yes
 UMask                   002
+UserID                  opendkim
+PidFile                 /run/opendkim/opendkim.pid
 Mode                    sv
 Canonicalization        relaxed/simple
 OversignHeaders         From
@@ -449,8 +472,21 @@ ExternalIgnoreList      /etc/opendkim/TrustedHosts
 InternalHosts           /etc/opendkim/TrustedHosts
 EOF
 
+# Ubuntu 24's packaged unit is Type=forking and times out without a pid file.
+install -d /etc/systemd/system/opendkim.service.d
+cat > /etc/systemd/system/opendkim.service.d/override.conf <<'EOF'
+[Service]
+Type=simple
+User=opendkim
+Group=opendkim
+PIDFile=
+ExecStart=
+ExecStart=/usr/sbin/opendkim -x /etc/opendkim.conf -f
+EOF
+systemctl daemon-reload
 systemctl enable opendkim
 systemctl restart opendkim
+systemctl is-active --quiet opendkim || die "opendkim failed to start. See: journalctl -u opendkim -n 40 --no-pager"
 
 set_kv_postconf milter_protocol 6
 set_kv_postconf milter_default_action accept
@@ -567,7 +603,9 @@ done
 RC_CONFIG="/etc/roundcube/config.inc.php"
 backup_file "$RC_CONFIG"
 
-# Add/replace critical Roundcube settings safely.
+# Debian/Ubuntu 24 Roundcube 1.6 reads imap_host / smtp_host. The old
+# default_host / smtp_server keys are ignored, so webmail talks to
+# localhost:587 with no STARTTLS and reports "Authentication failed".
 python3 - "$RC_CONFIG" "$MAIL_HOST" "$ROOT_DOMAIN" "$DISPLAY_NAME" <<'PY'
 import sys, re
 from pathlib import Path
@@ -578,6 +616,8 @@ product=sys.argv[4]
 s=path.read_text()
 
 settings={
+"imap_host": f"ssl://{mail_host}:993",
+"smtp_host": f"tls://{mail_host}:587",
 "default_host": f"ssl://{mail_host}",
 "default_port": "993",
 "smtp_server": f"tls://{mail_host}",
@@ -601,6 +641,49 @@ for key,val in settings.items():
         s += "\n"+line+"\n"
 path.write_text(s)
 PY
+
+# Roundcube's MySQL database is not created unless dbconfig-common ran.
+systemctl enable --now mariadb
+python3 <<'PY'
+from pathlib import Path
+import re, secrets, subprocess, sys
+debian_db = Path("/etc/roundcube/debian-db.php")
+if not debian_db.exists():
+    raise SystemExit("missing /etc/roundcube/debian-db.php")
+text = debian_db.read_text()
+def read_var(name, default=""):
+    m = re.search(rf"\${name}\s*=\s*'([^']*)'", text)
+    return m.group(1) if m else default
+dbname = read_var("dbname", "roundcube")
+dbuser = read_var("dbuser", "roundcube")
+dbpass = read_var("dbpass", "")
+if not re.fullmatch(r"[A-Za-z0-9_]+", dbname) or not re.fullmatch(r"[A-Za-z0-9_]+", dbuser):
+    raise SystemExit("unexpected Roundcube database identifiers")
+if dbpass == "":
+    dbpass = secrets.token_hex(18)
+    assign = "$dbpass='" + dbpass + "';"
+    if re.search(r"\$dbpass\s*=\s*'[^']*'", text):
+        text = re.sub(r"\$dbpass\s*=\s*'[^']*';", assign, text, count=1)
+    else:
+        text += "\n" + assign + "\n"
+    debian_db.write_text(text)
+sql = (
+    f"CREATE DATABASE IF NOT EXISTS `{dbname}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n"
+    f"CREATE USER IF NOT EXISTS '{dbuser}'@'localhost' IDENTIFIED BY '{dbpass}';\n"
+    f"ALTER USER '{dbuser}'@'localhost' IDENTIFIED BY '{dbpass}';\n"
+    f"GRANT ALL PRIVILEGES ON `{dbname}`.* TO '{dbuser}'@'localhost';\n"
+    "FLUSH PRIVILEGES;\n"
+)
+subprocess.run(["mysql"], input=sql, text=True, check=True)
+tables = subprocess.check_output(["mysql", dbname, "-N", "-e", "SHOW TABLES LIKE 'session'"], text=True)
+schema = Path("/usr/share/roundcube/SQL/mysql.initial.sql")
+if "session" not in tables and schema.exists():
+    subprocess.run(["mysql", dbname], input=schema.read_text(), text=True, check=True)
+print("roundcube-db-ready")
+PY
+systemctl reload "$(basename "${PHP_FPM_SOCK%.sock}")" 2>/dev/null || \
+  systemctl reload php8.3-fpm 2>/dev/null || \
+  systemctl reload php-fpm 2>/dev/null || true
 
 NGINX_SITE="/etc/nginx/sites-available/$WEBMAIL_HOST"
 backup_file "$NGINX_SITE"
